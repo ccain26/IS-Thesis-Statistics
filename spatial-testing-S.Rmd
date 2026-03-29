@@ -1,0 +1,311 @@
+---
+title: "spatial testing S"
+author: "Charles Cain"
+date: "2026-02-09"
+output: html_document
+---
+
+```{r echo=FALSE}
+#packages
+library(mosaic) 
+library(olsrr)
+library(ggplot2)
+library(spdep)
+library(spmodel)
+library(sp)
+library(brms)
+```
+
+## S Spatial Tests
+
+```{r echo=FALSE}
+#csvs
+s1 <- read.csv("data/S1.csv")
+s3 <- read.csv("data/S3_Rows_3.csv")
+z2z3 <- read.csv("data/Z2_Z3_S2_Rows_BG.csv")
+
+#shapefiles
+s1.shape <- st_read("data/S1.dbf")
+s3.shape <- st_read("data/S3.dbf")
+z2z3.shape <- st_read("data/Z2Z3.dbf")
+```
+
+## S1
+
+```{r s1 descriptive statistics}
+#descriptive statistics
+favstats(~s1$Count.of.Lines, data=s1)
+gf_boxplot(~s1$Count.of.Lines, orientation='y', data=s1)
+
+favstats(~s1$Count.of.Points, data=s1)
+gf_bar(~s1$Count.of.Polygons, data=s1)
+gf_boxplot(s1$Count.of.Points~s1$X2022.Total.Population, orientation='y', data=s1)
+```
+
+## S1 Testing
+
+```{r s1 linear}
+#GENERAL LINEAR MODELS
+s1.length <- lm(s1$Mean.Existing.Commercial.Sqft ~ s1$Mean.SEGLENGTH, data=s1)
+summary(s1.length)
+print('AIC OF S1 LENGTH')
+AIC(s1.length)
+
+s1.count <- lm(s1$Mean.Existing.Commercial.Sqft ~ s1$Count.of.Lines, data=s1)
+summary(s1.count)
+print('AIC OF S1 COUNT')
+AIC(s1.count)
+
+plot(s1.length)
+plot(s1.count)
+```
+
+```{r s1 spatial}
+#SPATIAL REGRESSIONS
+#create merged s1 and shapefile
+#rename fips code to exact same for merge:
+s1 <- s1 %>% dplyr::rename('FIPS'='FIPS.Code')
+s1.merge <- merge(s1.shape, s1)
+
+#create neighbor definition
+nbs1.queen <- poly2nb(s1.merge, queen=TRUE)
+nbs1.rook <- poly2nb(s1.merge, queen=FALSE)
+
+#create second order neighbor definitions
+#with nbs1 queen / rook definition
+nbs1.queen.second <- nblag(nbs1.queen, maxlag=2)
+nbs1.rook.second <- nblag(nbs1.rook, maxlag=2)
+
+#create neighbor weights for 1st and 2nd order
+weights.queen <- nb2listw(nbs1.queen, style='B', zero.policy=TRUE)
+weights.queen.second <- nb2listw(nbs1.queen.second[[2]], style='B', zero.policy=TRUE)
+
+weights.rook <- nb2listw(nbs1.rook, style='B', zero.policy=TRUE)
+weights.rook.second <- nb2listw(nbs1.rook.second[[2]], style='B', zero.policy=TRUE)
+
+#create neighbor matrices
+nbs.queen.mat <- listw2mat(weights.queen)
+nbs.queen.second.mat <- listw2mat(weights.queen.second) 
+
+nbs.rook.mat <- listw2mat(weights.rook)
+nbs.rook.second.mat <- listw2mat(weights.rook.second)
+
+#Moran's I Test of Spatial Autocorrelation
+moran.test(s1.merge$Mean.SEGLENGTH, weights.queen, alternative='greater')
+
+#S1 spatial regressions:
+s1.splength.q <- spautor(Mean.Existing.Commercial.Sqft ~ Mean.SEGLENGTH, W = nbs.queen.mat, data=s1.merge)
+summary(s1.splength.q)
+print('AIC OF S1 SPATIAL QUEEN')
+AIC(s1.splength.q)
+
+s1.splength.q2 <- spautor(Mean.Existing.Commercial.Sqft ~ Mean.SEGLENGTH, W = nbs.queen.second.mat, data=s1.merge)
+summary(s1.splength.q2)
+print('AIC OF S1 SPATIAL QUEEN 2')
+AIC(s1.splength.q2)
+
+s1.splength.r <- spautor(Mean.Existing.Commercial.Sqft ~ Mean.SEGLENGTH, W = nbs.rook.mat, data=s1.merge)
+summary(s1.splength.r)
+print('AIC OF S1 SPATIAL ROOK')
+AIC(s1.splength.r)
+
+s1.splength.r2 <- spautor(Mean.Existing.Commercial.Sqft ~ Mean.SEGLENGTH, W = nbs.rook.second.mat, data=s1.merge)
+summary(s1.splength.r2)
+print('AIC OF S1 SPATIAL ROOK 2')
+AIC(s1.splength.r2)
+
+#GWR for S1
+s1.bwVal <- GWmodel::bw.gwr(Mean.Existing.Commercial.Sqft ~ Mean.SEGLENGTH, data=s1.merge,
+                         approach = 'AICc', kernel = 'bisquare', 
+                         adaptive = TRUE)
+
+s1.gwr.res <- GWmodel::gwr.basic(Mean.Existing.Commercial.Sqft ~ Mean.SEGLENGTH,
+                         data = s1.merge %>% sf::as_Spatial(), 
+                         bw = s1.bwVal, kernel = "bisquare", adaptive = TRUE)
+
+#Show the results
+print(s1.gwr.res)
+
+s1.spgwr <- s1.gwr.res$SDF
+s1.spgwr.data <- s1.gwr.res$SDF@data
+s1.spgwr.data$pMaster <- 2*pt(-abs(s1.spgwr.data$`Mean.SEGLENGTH_TV`), df = dim(s1.spgwr.data)[1] -1)
+
+# This show how the coefficients of the master degree on unemployment change over space. 
+#second ARG is what measure of fit
+s1.spgwr@data <- s1.spgwr.data
+spplot(s1.spgwr, 'pMaster', main="S1: P Values for GW Regression")
+```
+
+## S2 and S3
+
+```{r s2 s3 descriptive statistics}
+#basic info
+favstats(~s1$Max.Dwellings.Per.Sq.Mi, data=s1)
+favstats(~z2z3$Current.Dwellings.Per.Sq.Mi, data=z2z3)
+```
+
+```{r s2 s3 linear}
+#GENERAL LINEAR MODELS 
+s2.reg <- lm(z2z3$Count.of.Points ~ z2z3$Current.Dwellings.Per.Sq.Mi, data=z2z3)
+summary(s2.reg)
+print('AIC OF S2')
+AIC(s2.reg)
+plot(s2.reg)
+
+s3.reg <- lm(s3$Count.of.Points ~ s3$Percent.Neutral.Ground, data=s3)
+summary(s3.reg)
+print('AIC OF S3 LINEAR')
+AIC(s3.reg)
+```
+
+
+```{r s2 s3 spatial}
+#SPATIAL REGRESSIONS
+#rename fips code to exact same for merge:
+z2z3 <- z2z3 %>% dplyr::rename('FIPS'='FIPS.Code')
+z2z3.merge <- merge(z2z3.shape, z2z3)
+
+s3 <- s3 %>% dplyr::rename('FIPS'='FIPS.Code')
+s3.merge <- merge(s3.shape, s3)
+
+#create neighbor definition:z2z3
+nb23.queen <- poly2nb(z2z3.merge, queen=TRUE)
+nb23.rook <- poly2nb(z2z3.merge, queen=FALSE)
+
+#create second order neighbor definitions
+#with nb23 queen / rook definition
+nb23.queen.second <- nblag(nb23.queen, maxlag=2)
+nb23.rook.second <- nblag(nb23.rook, maxlag=2)
+
+#create weights for both 1st and 2nd
+#nb23.mat <- nb2mat(nb, style='B', zero.policy=TRUE)
+
+weights23.queen <- nb2listw(nb23.queen, style='B', zero.policy=TRUE)
+weights23.queen.second <- nb2listw(nb23.queen.second[[2]], style='B', zero.policy=TRUE)
+
+weights23.rook <- nb2listw(nb23.rook, style='B', zero.policy=TRUE)
+weights23.rook.second <- nb2listw(nb23.rook.second[[2]], style='B', zero.policy=TRUE)
+
+#create matrices S2
+nb23.queen.mat <- listw2mat(weights23.queen)
+nb23.queen.second.mat <- listw2mat(weights23.queen.second) 
+
+nb23.rook.mat <- listw2mat(weights23.rook)
+nb23.rook.second.mat <- listw2mat(weights23.rook.second)
+
+#Moran's I Test of spatial autocorrelation
+moran.test(z2z3.merge$Current.Dwellings.Per.Sq.Mi, weights.queen, alternative='greater')
+
+#create neighbor definition: s3
+nbs3.queen <- poly2nb(s3.merge, queen=TRUE)
+nbs3.rook <- poly2nb(s3.merge, queen=FALSE)
+
+#create second order neighbor definitions
+#with nbs3 queen / rook definition
+nbs3.queen.second <- nblag(nbs3.queen, maxlag=2)
+nbs3.rook.second <- nblag(nbs3.rook, maxlag=2)
+
+#create weights for both 1st and 2nd
+weightss3.queen <- nb2listw(nbs3.queen, style='B', zero.policy=TRUE)
+weightss3.queen.second <- nb2listw(nbs3.queen.second[[2]], style='B', zero.policy=TRUE)
+
+weightss3.rook <- nb2listw(nbs3.rook, style='B', zero.policy=TRUE)
+weightss3.rook.second <- nb2listw(nbs3.rook.second[[2]], style='B', zero.policy=TRUE)
+
+#create matrices S3
+nbs3.queen.mat <- listw2mat(weightss3.queen)
+nbs3.queen.second.mat <- listw2mat(weightss3.queen.second) 
+
+nbs3.rook.mat <- listw2mat(weightss3.rook)
+nbs3.rook.second.mat <- listw2mat(weightss3.rook.second)
+
+
+#Moran's I Test of spatial autocorrelation
+moran.test(s3$Percent.Neutral.Ground, weightss3.queen, alternative='greater')
+
+#S2 spatial:
+s2.q <- spautor(Count.of.Points ~ Current.Dwellings.Per.Sq.Mi, data=z2z3.merge, W = nb23.queen.mat, spcov_type='car')
+summary(s2.q)
+print('AIC OF S2 Q')
+AIC(s2.q)
+
+s2.q2 <- spautor(Count.of.Points ~ Current.Dwellings.Per.Sq.Mi, data=z2z3.merge, W = nb23.queen.second.mat, spcov_type='car')
+summary(s2.q2)
+print('AIC OF S2 Q 2')
+AIC(s2.q)
+
+s2.r <- spautor(Count.of.Points ~ Current.Dwellings.Per.Sq.Mi, data=z2z3.merge, W = nb23.rook.mat, spcov_type='car')
+summary(s2.r)
+print('AIC OF S2 R')
+AIC(s2.r)
+
+s2.r2 <- spautor(Count.of.Points ~ Current.Dwellings.Per.Sq.Mi, data=z2z3.merge, W = nb23.rook.second.mat, spcov_type='car')
+summary(s2.r2)
+print('AIC OF S2 R 2')
+AIC(s2.r2)
+
+#GWR for S2
+s2.bwVal <- GWmodel::bw.gwr(Count.of.Points ~ Current.Dwellings.Per.Sq.Mi, data=z2z3.merge,
+                         approach = 'AICc', kernel = 'bisquare', 
+                         adaptive = TRUE)
+
+s2.gwr.res <- GWmodel::gwr.basic(Count.of.Points ~ Current.Dwellings.Per.Sq.Mi,
+                         data = z2z3.merge %>% sf::as_Spatial(), 
+                         bw = s2.bwVal, kernel = "bisquare", adaptive = TRUE)
+
+# Show the results
+print(s2.gwr.res)
+
+s2.spgwr <- s2.gwr.res$SDF
+s2.spgwr.data <- s2.gwr.res$SDF@data
+s2.spgwr.data$pMaster <- 2*pt(-abs(s2.spgwr.data$`Current.Dwellings.Per.Sq.Mi_TV`), df = dim(s2.spgwr.data)[1] -1)
+
+# This show how the coefficients of the master degree on unemployment change over space. 
+#second ARG is what measure of fit
+s2.spgwr@data <- s2.spgwr.data
+
+spplot(s2.spgwr, 'pMaster', main="S2: P Values for GW Regression")
+
+#S3 Spatial
+s3.q <- spautor(Count.of.Points ~ Percent.Neutral.Ground, data=s3.merge, W = nbs3.queen.mat, spcov_type='car')
+summary(s3.q)
+print('AIC OF S3 QUEEN')
+AIC(s3.q)
+
+s3.q2 <- spautor(Count.of.Points ~ Percent.Neutral.Ground, data=s3.merge, W = nbs3.queen.second.mat, spcov_type='car')
+summary(s3.q2)
+print('AIC OF S3 QUEEN 2')
+AIC(s3.q2)
+
+s3.r <- spautor(Count.of.Points ~ Percent.Neutral.Ground, data=s3.merge, W = nbs3.rook.mat, spcov_type='car')
+summary(s3.r)
+print('AIC OF S3 ROOK')
+AIC(s3.r)
+
+s3.r2 <- spautor(Count.of.Points ~ Percent.Neutral.Ground, data=s3.merge, W = nbs3.rook.second.mat, spcov_type='car')
+summary(s3.r2)
+print('AIC OF S3 ROOK 2')
+AIC(s3.r2)
+
+#GWR for S3
+s3.bwVal <- GWmodel::bw.gwr(Count.of.Points ~ Percent.Neutral.Ground, data=s3.merge,
+                         approach = 'AICc', kernel = 'bisquare', 
+                         adaptive = TRUE)
+
+s3.gwr.res <- GWmodel::gwr.basic(Count.of.Points ~ Percent.Neutral.Ground,
+                         data = s3.merge %>% sf::as_Spatial(), 
+                         bw = s3.bwVal, kernel = "bisquare", adaptive = TRUE)
+
+# Show the results
+print(s3.gwr.res)
+
+s3.spgwr <- s3.gwr.res$SDF
+s3.spgwr.data <- s3.gwr.res$SDF@data
+s3.spgwr.data$pMaster <- 2*pt(-abs(s3.spgwr.data$`Percent.Neutral.Ground_TV`), df = dim(s3.spgwr.data)[1] -1)
+
+# This show how the coefficients of the master degree on unemployment change over space. 
+#second ARG is what measure of fit
+s3.spgwr@data <- s3.spgwr.data
+
+spplot(s3.spgwr, 'pMaster', main="S3: P Values for GW Regression")
+```

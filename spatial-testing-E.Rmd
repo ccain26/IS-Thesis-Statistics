@@ -1,0 +1,188 @@
+---
+title: "spatial testing E"
+author: "Charles Cain"
+date: "2026-02-09"
+output: html_document
+---
+
+```{r echo=FALSE}
+#packages
+library(mosaic) 
+library(olsrr)
+library(ggplot2)
+library(spdep)
+library(spmodel)
+library(sp)
+library(brms)
+```
+
+## IS Spatial Tests
+
+```{r echo=FALSE}
+#csvs
+e1e2 <- read.csv("data/E1 E2 Rows.csv")
+
+#shapefiles
+e1e2.shape <- st_read("data/E1E2.dbf")
+```
+
+## E1
+
+```{r e1 e2 descriptive statistics}
+#basic info
+favstats(~e1e2$Tract.Gini, data=e1e2)
+#gf_boxplot(~e1e2$Tract.Gini, data=e1e2)
+
+#gf_boxplot(~e1e2$Mean.Year.Built, data=e1e2)
+#gf_boxplot(~e1e2$Standard.Deviation.Year.Built, data=e1e2)
+```
+
+## E1 Testing
+
+```{r e1 e2 lm}
+#GENERAL LINEAR MODELS
+e1.reg <- lm(e1e2$Count.of.Points ~ e1e2$Tract.Gini, data=e1e2)
+summary(e1.reg)
+print('AIC E1')
+AIC(e1.reg)
+plot(e1.reg)
+
+e2.reg <- lm(e1e2$Count.of.Points ~ e1e2$Standard.Deviation.Year.Built, data=e1e2)
+summary(e2.reg)
+print('AIC E2')
+AIC(e1.reg)
+plot(e1.reg)
+
+e1e2.reg <- lm(e1e2$Count.of.Points ~ e1e2$Tract.Gini + e1e2$Standard.Deviation.Year.Built, data=e1e2)
+summary(e1e2.reg)
+print('AIC E1E2')
+AIC(e1.reg)
+plot(e1.reg)
+```
+
+```{r e1 spreg}
+#SPATIAL REGRESSIONS
+#rename fips code to exact same for merge:
+#create shapefile
+e1e2 <- e1e2 %>% dplyr::rename('FIPS'='FIPS.Code')
+e1e2.merge <- merge(e1e2.shape, e1e2)
+
+#create neighbor definition: e1e2
+nb12.queen <- poly2nb(e1e2.merge, queen=TRUE)
+nb12.rook <- poly2nb(e1e2.merge, queen=FALSE)
+
+#create second order neighbor definitions
+#with nb12 queen / rook definition
+nb12.queen.second <- nblag(nb12.queen, maxlag=2)
+nb12.rook.second <- nblag(nb12.rook, maxlag=2)
+
+#create weights for both 1st and 2nd
+weights.queen <- nb2listw(nb12.queen, style='B', zero.policy=TRUE)
+weights.queen.second <- nb2listw(nb12.queen.second[[2]], style='B', zero.policy=TRUE)
+
+weights.rook <- nb2listw(nb12.rook, style='B', zero.policy=TRUE)
+weights.rook.second <- nb2listw(nb12.rook.second[[2]], style='B', zero.policy=TRUE)
+
+#create matrices
+nb12.queen.mat <- listw2mat(weights.queen)
+nb12.queen.second.mat <- listw2mat(weights.queen.second) 
+
+nb12.rook.mat <- listw2mat(weights.rook)
+nb12.rook.second.mat <- listw2mat(weights.rook.second) 
+
+#Moran's I Test of Spatial Autocorrelation E1
+moran.test(e1e2.merge$Tract.Gini, weights.queen, alternative='greater')
+
+#Moran's I Test of Spatial Autocorrelation E2
+moran.test(e1e2.merge$Standard.Deviation.Year.Built, weights.queen, alternative='greater')
+
+#E1 Spatial Regressions
+#e1 first and second:
+e1.q <- spautor(Count.of.Points ~ Tract.Gini, data=e1e2.merge, spcov_type='car', W = nb12.queen.mat)
+summary(e1.q)
+print('AIC SPATIAL QUEEN:')
+AIC(e1.q)
+
+e1.q2 <- spautor(Count.of.Points ~ Tract.Gini, data=e1e2.merge, spcov_type='car', W = nb12.queen.second.mat)
+summary(e1.q2)
+print('AIC SPATIAL QUEEN 2:')
+AIC(e1.q2)
+
+e1.r <- spautor(Count.of.Points ~ Tract.Gini, data=e1e2.merge, spcov_type='car', W = nb12.rook.mat)
+summary(e1.r)
+print('AIC SPATIAL ROOK:')
+AIC(e1.r)
+
+e1.r2 <- spautor(Count.of.Points ~ Tract.Gini, data=e1e2.merge, spcov_type='car', W = nb12.rook.second.mat)
+summary(e1.r2)
+print('AIC SPATIAL ROOK 2:')
+AIC(e1.r2)
+
+#GWR for E1
+bwVal.e1 <- GWmodel::bw.gwr(Count.of.Points ~ Tract.Gini, data=e1e2.merge,
+                         approach = 'AICc', kernel = 'bisquare', 
+                         adaptive = TRUE)
+
+gwr.res.e1 <- GWmodel::gwr.basic(Count.of.Points ~ Tract.Gini,
+                         data = e1e2.merge %>% sf::as_Spatial(), 
+                         bw = bwVal.e1, kernel = "bisquare", adaptive = TRUE)
+
+# Show the results
+print(gwr.res.e1)
+
+spGWR.e1 <- gwr.res.e1$SDF 
+spGWR.e1.data <- gwr.res.e1$SDF@data
+spGWR.e1.data$pMaster <- 2*pt(-abs(spGWR.e1.data$`Tract.Gini_TV`), df = dim(spGWR.e1.data)[1] -1)
+
+# This show how the coefficients of the master degree on unemployment change over space. 
+#second ARG is what measure of fit
+spGWR.e1@data <- spGWR.e1.data
+spplot(spGWR.e1, 'pMaster', main="E1: P Values for GW Regression")
+
+#E2 Spatial:
+e2.q <- spautor(Count.of.Points ~ Standard.Deviation.Year.Built, W = nb12.queen.mat, data=e1e2.merge)
+summary(e2.q)
+print('E2 SPATIAL TEST AIC QUEEN:')
+AIC(e2.q)
+
+e2.q2 <- spautor(Count.of.Points ~ Standard.Deviation.Year.Built, W = nb12.queen.second.mat, data=e1e2.merge)
+summary(e2.q2)
+print('E2 SPATIAL TEST AIC QUEEN 2:')
+AIC(e2.q2)
+
+e2.r <- spautor(Count.of.Points ~ Standard.Deviation.Year.Built, W = nb12.rook.mat, data=e1e2.merge)
+summary(e2.r)
+print('E2 SPATIAL TEST AIC ROOK:')
+AIC(e2.r)
+
+e2.r2 <- spautor(Count.of.Points ~ Standard.Deviation.Year.Built, W = nb12.rook.second.mat, data=e1e2.merge)
+summary(e2.r2)
+print('E2 SPATIAL TEST AIC ROOK 2:')
+AIC(e2.r2)
+
+
+#GWR for E2
+e2.bwVal <- GWmodel::bw.gwr(Count.of.Points ~ Standard.Deviation.Year.Built, data=e1e2.merge,
+                         approach = 'AICc', kernel = 'bisquare', 
+                         adaptive = TRUE)
+
+e2.res.gwr <- GWmodel::gwr.basic(Count.of.Points ~ Standard.Deviation.Year.Built,
+                         data = e1e2.merge %>% sf::as_Spatial(), 
+                         bw = e2.bwVal, kernel = "bisquare", adaptive = TRUE)
+
+# Show the results
+print(e2.res.gwr)
+
+e2.spGWR <- e2.res.gwr$SDF 
+e2.spGWR.data <- e2.res.gwr$SDF@data
+e2.spGWR.data$pMaster <- 2*pt(-abs(e2.spGWR.data$`Standard.Deviation.Year.Built_TV`), df = dim(e2.spGWR.data)[1] -1)
+
+
+e2.spGWR <- e2.res.gwr$SDF 
+e2.spGWR$pMaster <- 2*pt(-abs(e2.spGWR.data$`Standard.Deviation.Year.Built_TV`), df = dim(e2.spGWR.data)[1] -1)
+
+# This show how the coefficients of the master degree on unemployment change over space. 
+#second ARG is what measure of fit
+e2.spGWR@data <- e2.spGWR.data
+spplot(e2.spGWR, 'pMaster', main="E2: P Values for GW Regression")
+```

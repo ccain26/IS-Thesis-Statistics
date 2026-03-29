@@ -1,0 +1,381 @@
+---
+title: "spatial testing Z"
+author: "Charles Cain"
+date: "2026-02-09"
+output: html_document
+---
+
+```{r echo=FALSE}
+#packages
+library(mosaic) 
+library(olsrr)
+library(ggplot2)
+library(spdep)
+library(spmodel)
+library(sp)
+library(brms)
+```
+
+## IS Spatial Tests for Z1 Z2 Z3
+
+```{r echo=FALSE}
+#csvs
+z1 <- read.csv("data/Z1 final.csv")
+z2z3 <- read.csv("data/Z2_Z3_S2_Rows_BG.csv")
+
+s1 <- read.csv("data/S1.csv")
+s3 <- read.csv("data/S3_Rows_3.csv")
+
+e1e2 <- read.csv("data/E1 E2 Rows.csv")
+
+#shapefiles
+z1.shape <- st_read("data/Z1.dbf")
+z2z3.shape <- st_read("data/Z2Z3.dbf")
+
+s1.shape <- st_read("data/S1.dbf")
+s3.shape <- st_read("data/S3.dbf")
+
+e1e2.shape <- st_read("data/E1E2.dbf")
+```
+
+## Z1
+
+```{r z1 descriptive statistics}
+#basic info
+favstats(~z1$Count.of.Type, data=z1)
+gf_boxplot(~z1$Count.of.Type, orientation='y', data=z1)
+
+#filter out broken zoning districts
+z1 <- subset(z1, z1$Mixed.Use.Type != '')
+
+#set up logistic regression by mixed use type
+lowmix <- ifelse(z1$Mixed.Use.Type == 'Not Mixed Use', 1, 0)
+somemix <- ifelse(z1$Mixed.Use.Type == 'Some Mixed Use', 1, 0)
+highmix <- ifelse(z1$Mixed.Use.Type == 'Many Mixed Uses', 1, 0)
+
+#for multiple regression
+lowmixdummy <- 0
+somemixdummy <- ifelse(z1$Mixed.Use.Type == 'Some Mixed Use', 1, 0)
+highmixdummy <- ifelse(z1$Mixed.Use.Type == 'Many Mixed Uses', 1, 0)
+
+#add them in
+z1$lowmix <- lowmix
+z1$somemix <- somemix
+z1$highmix <- highmix
+
+z1$lowmixdummy <- lowmixdummy
+z1$somemixdummy <- somemixdummy
+z1$highmixdummy <- highmixdummy
+
+favstats(~Mixed.Use.Type, data=z1)
+tally(~Mixed.Use.Type, data=z1)
+gf_bar(~z1$Mixed.Use.Type, data=z1)
+gf_boxplot(Mixed.Use.Type~Count.of.Type, orientation='y', ylab='Mixed Use Type', xlab='Count of Type', fill='orchid2', data=z1)
+```
+
+## Z1 Testing
+
+```{r z1 lm}
+#GENERAL LINEAR MODELS:
+z1.test <- lm(Count.of.Type ~ as.factor(z1$Mixed.Use.Type), data = z1)
+summary(z1.test)
+
+#further testing one way anova because one predictor
+anova(z1.test, test = "Chisq")
+
+plot(z1.test)
+```
+
+```{r z1 spreg}
+#SPATIAL REGRESSIONS
+#create test (small merge)
+#z1.merge.small <- merge(z1.shape, z1)
+#filters roughly the downtown area only:
+#z1.merge.small <- z1.merge.small %>% dplyr::filter((z1.merge.small$ZONEID > 3500) & (z1.merge.small$ZONEID < 5000))
+
+#create main merged z1 and shapefile
+#filter first to unique
+z1.merge <- merge(z1.shape, z1)
+
+z1.merge <- unique(z1.merge)
+#check for NAs in mixed use type (causes issues in spatial)
+sapply(z1.merge, function(x) sum(is.na(z1.merge$Mixed.Use.Type)))
+
+#create neighbor definition for Z1
+nb <- poly2nb(z1.merge, queen = TRUE)
+
+#create weight
+weights <- nb2listw(nb, style='B', zero.policy=TRUE)
+nb.mat <- listw2mat(weights)
+
+nb.mat2 <- nb2mat(nb, style='B', zero.policy=TRUE)
+
+#Moran's I Test of Spatial Autocorrelation
+moran.test(z1.merge$Count.of.Type, weights, alternative='greater')
+
+#BRMS REGRESSION WITH ICAR AND ORDINAL DEPENDENT =============================
+z1.formula <- as.ordered(Mixed.Use.Type) ~ Count.of.Type + car(W, type='icar')
+z1.formula.C <- Count.of.Type ~ as.ordered(Mixed.Use.Type) + car(W, type='icar')
+z1.formula.INLA <- Count.of.Type ~ as.ordered(Mixed.Use.Type)
+
+get_prior(as.ordered(Mixed.Use.Type) ~ Count.of.Type,
+        data = z1.merge, family = sratio(), 
+          threshold = "equidistant")
+def.priors <- get_prior(z1.formula.C, data=z1.merge, data2 = list(W = nb.mat))
+def.priors
+priors <- c(
+prior(normal(0, 1), class = Intercept),
+prior(normal(0, 1), class = b, coef = as.orderedMixed.Use.Type.L),
+prior(normal(0, 1), class = b, coef = as.orderedMixed.Use.Type.Q)
+)
+
+#priors <- c(
+#  set_prior("normal(28700, 2000)", class = "Intercept"),
+#  set_prior(
+#    "normal(9006, 1000)", class = "b", 
+#    coef = "YearsExperience"
+#  ),
+#  set_prior("normal(0, 2000)", class = "sigma", lb = 0) 
+#)
+
+z1.brm <- brm(z1.formula.C,
+  data = z1.merge,
+  data2 = list(W = nb.mat),
+  prior = priors,
+ # prior = default_prior(z1.formula.C),#c(set_prior('normal(0,5)', class='b'),
+           # set_prior('normal(1,2)', class='b',coef='Mixed.Use.Type'), #mu of 1
+            #set_prior('cauchy(0,2)', class='sd', coef='Intercept')),
+  family=gaussian,#(link = 'probit'),
+  chains=4,
+  thin=1,
+  cores=10,
+  iter=2500,
+  control=list(adapt_delta=0.999, max_treedepth=20, stepsize = 0.001)
+)
+
+summary(z1.brm)
+```
+
+## Z2, Z3
+
+```{r z2 z3 descriptive statistics}
+#basic info
+favstats(~z2z3$Max.Dwellings.Per.Sq.Mi, data=z2z3)
+gf_boxplot(~z2z3$Max.Dwellings.Per.Sq.Mi, orientation='y', data=z2z3)
+options(scipen=999)
+gf_histogram(~z2z3$Max.Dwellings.Per.Sq.Mi/640, data=z2z3, bins=15, xlab='Max Dwellings per Acre', fill='orchid1',ylab='Count of Block Groups', format(x, scientific=FALSE))
+favstats(~z2z3$Persons.per.square.mile, data=z2z3)
+gf_boxplot(~z2z3$Persons.per.square.mile, orientation='y', data=z2z3)
+
+favstats(~z2z3$Mean.Max.Comm.FAR, data=z2z3)
+gf_histogram(~z2z3$Mean.Max.Comm.FAR, data=z2z3, bins=20, xlab='Mean Max Commercial FAR', fill='orchid1',ylab='Count of Block Groups', format(x, scientific=FALSE))
+gf_boxplot(~z2z3$Mean.Max.Comm.FAR, data=z2z3, xlab='Mean Max Commercial FAR', fill='orchid1', orientation='y',ylab='Count of Block Groups', format(x, scientific=FALSE))
+```
+
+
+```{r z2 z3 linear}
+#GENERAL LINEAR MODELS
+z2.dd <- lm(z2z3$Persons.per.square.mile ~ z2z3$Max.Dwellings.Per.Sq.Mi, data=z2z3)
+summary(z2.dd)
+print('AIC of Dwelling Density:')
+AIC(z2.dd)
+
+z3.maxc <- lm(z2z3$Current.Comm.Percent ~ (z2z3$Mean.Max.Comm.FAR), data=z2z3)
+z3.maxc
+print('AIC of Max Comm FAR:')
+summary(z3.maxc)
+AIC(z3.maxc)
+
+plot(z2.dd)
+plot(z3.maxc)
+```
+
+```{r z2 z3 spatial}
+#Z2 Z3 Spatial
+#change names before merge:
+#need to uncomment this and run at least once:
+z2z3 <- z2z3 %>% dplyr::rename('FIPS'='FIPS.Code')
+
+#create merged z2z3 and shapefile
+z2z3.merge <- merge(z2z3.shape, z2z3)
+
+#create neighbor definition
+nb23.queen <- poly2nb(z2z3.merge, queen=TRUE)
+nb23.rook <- poly2nb(z2z3.merge, queen=FALSE)
+
+#create second order neighbor definitions
+#with nb23 queen / rook definition
+nb23.queen.second <- nblag(nb23.queen, maxlag=2)
+nb23.rook.second <- nblag(nb23.rook, maxlag=2)
+
+#create weights for both 1st and 2nd
+weights.queen <- nb2listw(nb23.queen, style='B', zero.policy=TRUE)
+weights.queen.second <- nb2listw(nb23.queen.second[[2]], style='B', zero.policy=TRUE)
+
+weights.rook <- nb2listw(nb23.rook, style='B', zero.policy=TRUE)
+weights.rook.second <- nb2listw(nb23.rook.second[[2]], style='B', zero.policy=TRUE)
+
+#create matrices
+nb23.queen.mat <- listw2mat(weights.queen)
+nb23.queen.second.mat <- listw2mat(weights.queen.second) 
+
+nb23.rook.mat <- listw2mat(weights.rook)
+nb23.rook.second.mat <- listw2mat(weights.rook.second) 
+
+#Moran's I Tests of spatial autocorrelation
+moran.test(z2z3.merge$Max.Dwellings.Per.Sq.Mi, weights.queen, alternative='greater')
+moran.test(z2z3.merge$Mean.Max.Comm.FAR, weights.queen, alternative='greater')
+
+#Z2 Z3 Spatial
+#z2 first and second:
+z2.q <- spautor(Persons.per.square.mile ~ Max.Dwellings.Per.Sq.Mi, spcov_type='car', W = nb23.queen.mat, data=z2z3.merge)
+summary(z2.q)
+print('AIC of Z2 QUEEN:')
+AIC(z2.q)
+
+z2.q2 <- spautor(Persons.per.square.mile ~ Max.Dwellings.Per.Sq.Mi, spcov_type='car', W = nb23.queen.second.mat, data=z2z3.merge)
+summary(z2.q2)
+print('AIC of Z2 QUEEN 2:')
+AIC(z2.q2)
+
+z2.r <- spautor(Persons.per.square.mile ~ Max.Dwellings.Per.Sq.Mi, spcov_type='car', W = nb23.rook.mat, data=z2z3.merge)
+summary(z2.r)
+print('AIC of Z2 ROOK:')
+AIC(z2.r)
+
+z2.r2 <- spautor(Persons.per.square.mile ~ Max.Dwellings.Per.Sq.Mi, spcov_type='car', W = nb23.rook.second.mat, data=z2z3.merge)
+summary(z2.r2)
+print('AIC of Z2 ROOK 2:')
+AIC(z2.r2)
+
+#z3 first and second:
+z3.q <- spautor(Current.Comm.Percent ~ Mean.Max.Comm.FAR, W = nb23.queen.mat, data=z2z3.merge)
+summary(z3.q)
+print('AIC of Z3 QUEEN:')
+AIC(z3.q)
+
+z3.q2 <- spautor(Current.Comm.Percent ~ Mean.Max.Comm.FAR, W = nb23.queen.second.mat, data=z2z3.merge)
+summary(z3.q2)
+print('AIC of Z3 QUEEN 2:')
+AIC(z3.q2)
+
+z3.r <- spautor(Current.Comm.Percent ~ Mean.Max.Comm.FAR, W = nb23.rook.mat, data=z2z3.merge)
+summary(z3.r)
+print('AIC of Z3 ROOK:')
+AIC(z3.r)
+
+z3.r2 <- spautor(Current.Comm.Percent ~ Mean.Max.Comm.FAR, W = nb23.rook.second.mat, data=z2z3.merge)
+summary(z3.r2)
+print('AIC of Z3 ROOK 2:')
+AIC(z3.r2)
+
+#GWR for Z2
+z2.q2.bwVal <- GWmodel::bw.gwr(Persons.per.square.mile ~ Max.Dwellings.Per.Sq.Mi, data=z2z3.merge,
+                         approach = 'AICc', kernel = 'bisquare', 
+                         adaptive = TRUE)
+
+z2.gwr.res <- GWmodel::gwr.basic(Persons.per.square.mile ~ Max.Dwellings.Per.Sq.Mi,
+                         data = z2z3.merge %>% sf::as_Spatial(), 
+                         bw = z2.q2.bwVal, kernel = "bisquare", adaptive = TRUE)
+
+# Show the results
+print(z2.gwr.res)
+
+z2.spgwr <- z2.gwr.res$SDF
+z2.spgwr.data <- z2.gwr.res$SDF@data
+z2.spgwr.data$pMaster <- 2*pt(-abs(z2.spgwr.data$`Max.Dwellings.Per.Sq.Mi_TV`), df = dim(z2.spgwr.data)[1] -1)
+
+# This show how the coefficients of the master degree on unemployment change over space. 
+#second ARG is what measure of fit
+z2.spgwr@data <- z2.spgwr.data
+spplot(z2.spgwr, 'pMaster', main="Z2: P Values for GW Regression")
+
+#GWR for Z3
+z3.bwVal <- GWmodel::bw.gwr(z2z3$Current.Comm.Percent ~ Mean.Max.Comm.FAR, data=z2z3.merge,
+                         approach = 'AICc', kernel = 'bisquare', 
+                         adaptive = TRUE)
+
+z3.gwr.res <- GWmodel::gwr.basic(Current.Comm.Percent ~ Mean.Max.Comm.FAR,
+                         data = z2z3.merge %>% sf::as_Spatial(), 
+                         bw = z3.bwVal, kernel = "bisquare", adaptive = TRUE)
+
+# Show the results
+print(z3.gwr.res)
+
+z3.spgwr <- z3.gwr.res$SDF
+z3.spgwr.data <- z3.gwr.res$SDF@data
+z3.spgwr.data$pMaster <- 2*pt(-abs(z3.spgwr.data$`Mean.Max.Comm.FAR_TV`), df = dim(z3.spgwr.data)[1] -1)
+
+# This show how the coefficients of the master degree on unemployment change over space. 
+#second ARG is what measure of fit
+z3.spgwr@data <- z3.spgwr.data
+
+spplot(z3.spgwr, 'pMaster', main="Z3: P Values for GW Regression")
+```
+
+```{r final}
+#GENERAL LINEAR MODEL: Final
+#contains all IVs for Z2, Z3, S1, S2, S3, E1, E2
+formula.all <- Count.of.Points ~ (Persons.per.square.mile + Mean.Max.Comm.FAR + 
+                                  s1$Mean.SEGLENGTH + Current.Dwellings.Per.Sq.Mi + s3$Percent.Neutral.Ground + 
+                                  e1e2$Tract.Gini + e1e2$Standard.Deviation.Year.Built)
+
+all.dd <- lm(formula.all, data=z2z3)
+summary(all.dd)
+print('AIC of ALL LINEAR:')
+AIC(all.dd)
+
+#stepwise: select good ones
+all.dd.step <- ols_step_both_aic(all.dd, progress=TRUE)
+summary(all.dd.step$model)
+
+#what the model selected:
+formula.step <- Count.of.Points ~ (Persons.per.square.mile + Mean.Max.Comm.FAR + 
+                                  s3$Percent.Neutral.Ground + 
+                                  e1e2$Standard.Deviation.Year.Built)
+#create neighbor definition for ALL
+nb23.queen <- poly2nb(z2z3.merge, queen=TRUE)
+nb23.rook <- poly2nb(z2z3.merge, queen=FALSE)
+
+#create second order neighbor definitions
+#with nb23 queen / rook definition
+nb23.queen.second <- nblag(nb23.queen, maxlag=2)
+nb23.rook.second <- nblag(nb23.rook, maxlag=2)
+
+#create weights for both 1st and 2nd
+#nb23.mat <- nb2mat(nb, style='B', zero.policy=TRUE)
+
+weights.queen <- nb2listw(nb23.queen, style='B', zero.policy=TRUE)
+weights.queen.second <- nb2listw(nb23.queen.second[[2]], style='B', zero.policy=TRUE)
+
+weights.rook <- nb2listw(nb23.rook, style='B', zero.policy=TRUE)
+weights.rook.second <- nb2listw(nb23.rook.second[[2]], style='B', zero.policy=TRUE)
+
+#create matrices
+nb23.queen.mat <- listw2mat(weights.queen)
+nb23.queen.second.mat <- listw2mat(weights.queen.second) 
+
+nb23.rook.mat <- listw2mat(weights.rook)
+nb23.rook.second.mat <- listw2mat(weights.rook.second) 
+
+#Final Spatial
+all.q <- spautor(formula.step, spcov_type='car', W = nb23.queen.mat, data=z2z3.merge)
+summary(all.q)
+print('AIC of ALL QUEEN:')
+AIC(all.q)
+
+all.q2 <- spautor(formula.step, spcov_type='car', W = nb23.queen.second.mat, data=z2z3.merge)
+summary(all.q2)
+print('AIC of ALL QUEEN 2:')
+AIC(all.q2)
+
+all.r <- spautor(formula.step, spcov_type='car', W = nb23.rook.mat, data=z2z3.merge)
+summary(all.r)
+print('AIC of ALL ROOK:')
+AIC(all.r)
+
+all.r2 <- spautor(formula.step, spcov_type='car', W = nb23.rook.second.mat, data=z2z3.merge)
+summary(all.r2)
+print('AIC of ALL ROOK 2:')
+AIC(all.r2)
+```
