@@ -75,7 +75,7 @@ gf_boxplot(Mixed.Use.Type~Count.of.Type, orientation='y', ylab='Mixed Use Type',
 
 ## Z1 Testing
 
-```{r z1 lm}
+```{r z1 linear}
 #GENERAL LINEAR MODELS:
 z1.test <- lm(Count.of.Type ~ as.factor(z1$Mixed.Use.Type), data = z1)
 summary(z1.test)
@@ -86,7 +86,7 @@ anova(z1.test, test = "Chisq")
 plot(z1.test)
 ```
 
-```{r z1 spreg}
+```{r z1 spatial}
 #SPATIAL REGRESSIONS
 #create test (small merge)
 #z1.merge.small <- merge(z1.shape, z1)
